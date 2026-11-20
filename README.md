@@ -19,6 +19,7 @@ It aims to be a feature rich and high-performance [ECS](https://en.wikipedia.org
   - [Tags](#tags)
   - [Systems (Experimental)](#systems-experimental)
   - [Debug](#debug)
+- [Spatial Queries](#spatial-queries)
 - [Features](#features)
   - [Math](#math)
   - [Transform](#transform)
@@ -370,6 +371,54 @@ debug.PrintEntityCounts(world)
 // Archetype Layout: {TransformData, Size, SpriteData, WeaponData} has 49 entities
 // ...
 ```
+
+## Spatial Queries
+
+The [spatial package](https://pkg.go.dev/github.com/yohamta/donburi/features/spatial) provides a dynamic 2D spatial index on top of a `World`. It is intended for cases such as "find every enemy inside this skill's circle" where iterating all entities would be wasteful.
+
+An `Index` indexes the entities that own a given position component. It automatically stays in sync with the world: positions changed in place, entities created or destroyed, and components added or removed are all reflected by the next query.
+
+```go
+type PositionData struct {
+  X, Y float64
+}
+
+var Position = donburi.NewComponentType[PositionData]()
+
+// Build an index over Position. The default cell size is 64 world units.
+// The index reads the exported X and Y float fields of the component.
+index := spatial.NewIndex(world, Position)
+
+// Rectangle query: all enemies inside an axis-aligned box.
+for _, entry := range index.QueryRect(spatial.NewRect(-100, -100, 100, 100), filter.Contains(EnemyTag)) {
+  // ...
+}
+
+// Radius query: all enemies within 64 units of the caster.
+for _, entry := range index.QueryRadius(casterX, casterY, 64, filter.Contains(EnemyTag)) {
+  // ...
+}
+```
+
+Both queries accept any `filter.LayoutFilter`, so existing `filter.Contains`, `filter.And`, `filter.Not` and friends can be layered on top of the spatial predicate. Results are returned in ascending `Entity` order, which makes them deterministic between runs.
+
+Notes on behavior:
+
+- Rectangle edges and the circle boundary are inclusive, so a point exactly on the edge or exactly at `radius` is returned.
+- A zero radius returns only entities at the exact center point. A negative radius, a non-finite center, or a non-finite/invalid rectangle returns no results.
+- Negative coordinates are fully supported.
+- Entities whose position is NaN or infinite are never returned by queries.
+- Empty worlds return empty results. The index stores at most one entry per entity regardless of how far apart positions are, and queries never iterate an empty region larger than the occupied one, so a query spanning a huge coordinate range stays bounded by the number of entities.
+
+If the position component does not use `X`/`Y` fields (for example a `Vec2` stored in a nested field), supply an accessor:
+
+```go
+index := spatial.NewIndexFunc(world, Transform, func(t *TransformData) (float64, float64) {
+  return t.LocalPosition.X, t.LocalPosition.Y
+})
+```
+
+By default each query reconciles the index with the world, which is correct but costs a scan of the indexed archetypes (O(number of indexed entities) per query). This is because Donburi exposes component data as raw pointers, so an in-place position write cannot be observed directly. When issuing many queries per frame, call `index.Sync()` once after moving entities and build the index with `spatial.WithManualSync()`; then a query costs O(cells visited + matches) and scales with the number of matches rather than the world size. `WithCellSize` tunes the grid resolution.
 
 ## Features
 
